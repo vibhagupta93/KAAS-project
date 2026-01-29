@@ -1,0 +1,25 @@
+.idea
+.project
+.pydevproject
+.settings/
+**/__pycache__/
+rpi_bench/configurations/TSL0004P.keycore-wutai.yaml
+.DS_Store
+
+/rpi_bench/test_collections/fcs/DRAFT.py
+/rpi_bench/configurations/TSL0004P*
+
+# coverage
+.coverage
+
+# python environement
+env
+venv
+
+# tox
+.tox
+
+tests/reports
+
+# vscode
+.vscode

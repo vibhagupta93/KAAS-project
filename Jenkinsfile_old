@@ -1,0 +1,175 @@
+#!/usr/bin/env groovy
+
+def builds = [:]
+def stage_list = [:]
+stage_list = ["update_target", "update_target_virtualenv", "run_target_collection"]
+
+def runnable_boards = ["ACCM"]
+node_label  = 'TLS_ACCM_Testbench_4'
+MAX_EXECUTOR_NUM = 1
+
+gitlabBuilds(builds: stage_list) {
+
+stage ('update_target') {
+    node(node_label){
+        // Test if checkbox for sandbox resetting is set
+        if (params.reset_qa_folder_on_target == true){
+            echo "Triggering reset of the target's test_bench folder (delete + trigger git clone)"
+            sh(script:
+                """#!/usr/bin/env bash
+                whoami
+                id
+                uname -a
+                echo -ne "RPI IP Addr : " ; hostname -I
+                # Run full replacement of the local qa code
+                python3 ~/rpi_scripts/rpi_update_tenv.py -r
+                """)
+            currentBuild.result = 'SUCCESS'
+        }
+        else{
+            echo "No qa folder reset required : performing an update of the local master branch on target"
+            sh(script:
+                """#!/usr/bin/env bash
+                whoami
+                id
+                uname -a
+                #ip addr
+                echo "RPI IP Addr : "
+                hostname -I
+                # Run udate of the local qa code
+                python3 ~/rpi_scripts/rpi_update_tenv.py -u
+                """)
+            currentBuild.result = 'SUCCESS'
+        }
+        // Apply patchset here
+        if (params.apply_patch_by_branch == true){
+            gitbranch = BranchName
+            echo "User requires to apply a patchset. Running cherry-pick on given patchset..."
+            echo "${gitbranch}"
+
+            if ( gitbranch?.trim() == false){
+                echo "Please enter a valid Branch name"
+                currentBuild.result = 'FAILURE'
+            } else {
+                echo "Applying given branch"
+                sh(script:
+                    """#!/usr/bin/env bash
+                    python ~/rpi_scripts/rpi_update_tenv.py -p ${gitbranch}
+
+                    echo "*********************************************************"
+                    echo "*   Git Log"
+                    echo "*********************************************************"
+                    cd /home/jenkins/test_bench
+                    git status
+                    git log -n 1
+                    """)
+                currentBuild.result = 'SUCCESS'
+            }
+        }
+        // Request to update rpi_scripts
+        if (params.update_rpi_scripts == true){
+            sh(script:
+                    """#!/usr/bin/env bash
+                    echo "***************************"
+                    echo "      RPI scripts copy     "
+                    echo "***************************"
+                    cp -rf /home/jenkins/test_bench/rpi_scripts/* /home/jenkins/rpi_scripts/
+                    """,
+                    returnStatus:true)
+        }
+    }
+}
+stage ('update_target_virtualenv') {
+    node(node_label){
+        if (params.reset_virtualenv_on_target == true){
+            RETURN_CODE1=sh(script:
+                    """#!/usr/bin/env bash
+
+                    echo "***************************"
+                    echo " Update python Virtual Env "
+                    echo "***************************"
+
+                    python /home/jenkins/test_bench/rpi_bench/rpi_bench.py -e
+                    """,
+                    returnStatus:true)
+            echo "Return code is : ${RETURN_CODE1}"
+            currentBuild.result = 'SUCCESS'
+        }
+    }
+}
+stage ('run_target_collection') {
+    node(node_label){
+        //nocomma_tc_list = params.List_TestCase
+        //echo "Pipeline - test case list : ${nocomma_tc_list}"
+        if (params.testcase_list.contains("test_fcs_appium_install.py")){
+            nocomma_app_version = params.app_version.replace(",","")
+            echo "App version is : $nocomma_app_version"
+            arg_app_version = "--app_version ${nocomma_app_version}"
+        }
+        else {
+            arg_app_version = ""
+        }
+        if (params.use_marker == true){
+            exec_marker = "-m ${params.markers}"
+            //echo "Used marker --> ${params.markers}"
+            echo "Used marker --> ${exec_marker}"
+        }
+        else {
+            exec_marker = ""
+            echo "No marker is used"
+        }
+        test_collection = params.collection
+        //testcase = "params.List_TestCase.replace(",", " ")
+        list_testcase = params.testcase_list
+        testcases = list_testcase.replace(",", " ")
+
+        echo "Running ${test_collection} and test case : ${testcases}"
+        RETURN_CODE=sh(
+            script:
+                """#!/usr/bin/env bash
+
+                echo "***************************"
+                echo "      Run test-suites     "
+                echo "***************************"
+
+                killall python
+                killall tiny_obd_simu
+                pkill -f appium
+
+                #adb kill-server
+                #adb shell reboot
+                #adb wait-for-device
+                adb devices
+                echo "Clean up memory to start over videos"
+                adb -s 520013f8e83764a3 shell rm /sdcard/*.mp4
+                adb -s 520042a4ec9725df shell rm /sdcard/*.mp4
+                echo "TEST COLLECTION" ${test_collection}
+                echo "LIST TEST CASES" ${list_testcase}
+                echo "TESTCASES" ${testcases}
+                echo "----->  Enter virtualenv and run pytest"
+                python /home/jenkins/test_bench/rpi_bench/rpi_bench.py -g ${exec_marker} -c ${test_collection} -t ${testcases} -tc ${testcases} ${arg_app_version}
+                """,
+            returnStatus: true)
+
+        sh(script:"""
+                tar -czvf ./reports.tar.gz /home/jenkins/test_bench/rpi_bench/reports/
+                rm -f ./*.html
+                cp /home/jenkins/test_bench/rpi_bench/reports/*.html ./
+                #cp /home/jenkins/test_bench/rpi_bench/reports/out_report.xml ./
+                #cp /home/jenkins/test_bench/rpi_bench/reports/out_report.csv ./
+                """)
+            step([$class: 'ArtifactArchiver', artifacts: "*.html", fingerprint: true, allowEmptyArchive: true])
+            step([$class: 'ArtifactArchiver', artifacts: "reports.tar.gz", fingerprint: true, allowEmptyArchive: true])
+            /*step([$class: 'ArtifactArchiver', artifacts: "out_report.xml", fingerprint: true, allowEmptyArchive: true])*/
+            /*step([$class: 'ArtifactArchiver', artifacts: "out_report.csv", fingerprint: true, allowEmptyArchive: true])*/
+            /*result = readFile "out_report.csv"*/
+        echo "Pipeline - Return code is : ${RETURN_CODE}"
+        if (RETURN_CODE == 0){
+            currentBuild.result = 'SUCCESS'
+        } else {
+            currentBuild.result = 'FAILURE'
+        }
+    }
+}
+
+} /*End of gitlabBuilds*/
